@@ -1,0 +1,22 @@
+# Secrets and env
+.env
+.env.local
+*.env
+
+# Docker volumes (data)
+postgres-data/
+mongo-data/
+redis-data/
+es-data/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs
+*.log
+node_modules/
+playwright-report/
+test-results/
