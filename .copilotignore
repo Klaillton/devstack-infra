@@ -1,0 +1,5 @@
+# AI agent context optimization
+# (devstack-infra is small, but for consistency)
+
+.env*
+*-data/
