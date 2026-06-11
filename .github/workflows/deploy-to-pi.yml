@@ -1,19 +1,187 @@
-name: Deploy devstack (Docker Compose) to devserverpi
+name: Deploy devstack to devserverpi
 
 on:
-  push:
-    branches: [ main, master ]
-    paths:
-      - "docker-compose.yml"
-      - ".env.example"
-      - ".github/workflows/deploy-to-pi.yml"
+  repository_dispatch:
+    types:
+      - brewer-updated
+      - project-updated
   workflow_dispatch:
+    inputs:
+      project_key:
+        description: Project identifier (brewer, observability, ...)
+        required: true
+        default: brewer
+        type: string
+      source_sha:
+        description: Source commit SHA to deploy
+        required: true
+        type: string
+      source_ref:
+        description: Source ref to deploy
+        required: true
+        type: string
+      source_repo:
+        description: Source repository name
+        required: false
+        default: Klaillton/brewer
+        type: string
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      BREWER_SOURCE_REPOSITORY: ${{ vars.BREWER_SOURCE_REPOSITORY || 'Klaillton/brewer' }}
+      BREWER_SOURCE_REPO_DIR: ${{ vars.BREWER_SOURCE_REPO_DIR || '/home/dante/brewer' }}
+      BREWER_MANIFESTS_DIR: ${{ vars.BREWER_MANIFESTS_DIR || '/home/dante/brewer/k8s' }}
+      BREWER_NAMESPACE: ${{ vars.BREWER_NAMESPACE || 'brewer' }}
+      BREWER_ROLLOUT_DEPLOYMENT: ${{ vars.BREWER_ROLLOUT_DEPLOYMENT || 'brewer' }}
+      BREWER_HEALTH_URL: ${{ vars.BREWER_HEALTH_URL || vars.DEVSTACK_HEALTH_URL }}
+      BREWER_HEALTH_REQUIRED: ${{ vars.BREWER_HEALTH_REQUIRED || 'true' }}
+      OBSERVABILITY_SOURCE_REPOSITORY: ${{ vars.OBSERVABILITY_SOURCE_REPOSITORY || 'Klaillton/observability-epo' }}
+      OBSERVABILITY_SOURCE_REPO_DIR: ${{ vars.OBSERVABILITY_SOURCE_REPO_DIR || '/home/dante/observability-epo' }}
+      OBSERVABILITY_MANIFESTS_DIR: ${{ vars.OBSERVABILITY_MANIFESTS_DIR || '/home/dante/observability-epo/k8s' }}
+      OBSERVABILITY_NAMESPACE: ${{ vars.OBSERVABILITY_NAMESPACE || 'observability' }}
+      OBSERVABILITY_ROLLOUT_DEPLOYMENT: ${{ vars.OBSERVABILITY_ROLLOUT_DEPLOYMENT || 'grafana' }}
+      OBSERVABILITY_HEALTH_URL: ${{ vars.OBSERVABILITY_HEALTH_URL || vars.DEVSTACK_HEALTH_URL }}
+      OBSERVABILITY_HEALTH_REQUIRED: ${{ vars.OBSERVABILITY_HEALTH_REQUIRED || 'false' }}
     steps:
-      - name: Deploy infra to Raspberry Pi
+      - name: Resolve and validate deploy request
+        id: request
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_TYPE: ${{ github.event.action }}
+          PAYLOAD_PROJECT_KEY: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.project_key || inputs.project_key }}
+          PAYLOAD_SHA: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source_sha || inputs.source_sha }}
+          PAYLOAD_REF: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source_ref || inputs.source_ref }}
+          PAYLOAD_REPO: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source_repo || inputs.source_repo }}
+        run: |
+          set -euo pipefail
+
+          echo "event_name=$EVENT_NAME"
+          echo "event_type=$EVENT_TYPE"
+          echo "project_key=$PAYLOAD_PROJECT_KEY"
+          echo "source_repo=$PAYLOAD_REPO"
+          echo "source_ref=$PAYLOAD_REF"
+          echo "source_sha=$PAYLOAD_SHA"
+
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            if [[ "$EVENT_TYPE" != "brewer-updated" && "$EVENT_TYPE" != "project-updated" ]]; then
+              echo "Unexpected repository_dispatch type: $EVENT_TYPE"
+              exit 1
+            fi
+          fi
+
+          project_key="$PAYLOAD_PROJECT_KEY"
+          if [[ -z "$project_key" && "$EVENT_TYPE" == "brewer-updated" ]]; then
+            project_key="brewer"
+          fi
+
+          if [[ -z "$project_key" ]]; then
+            echo "Missing project_key in payload"
+            exit 1
+          fi
+
+          case "$project_key" in
+            brewer)
+              source_repo_allowlist="$BREWER_SOURCE_REPOSITORY"
+              source_repo_dir="$BREWER_SOURCE_REPO_DIR"
+              manifests_dir="$BREWER_MANIFESTS_DIR"
+              namespace="$BREWER_NAMESPACE"
+              rollout_deployment="$BREWER_ROLLOUT_DEPLOYMENT"
+              health_url="$BREWER_HEALTH_URL"
+              health_required="$BREWER_HEALTH_REQUIRED"
+              ;;
+            observability)
+              source_repo_allowlist="$OBSERVABILITY_SOURCE_REPOSITORY"
+              source_repo_dir="$OBSERVABILITY_SOURCE_REPO_DIR"
+              manifests_dir="$OBSERVABILITY_MANIFESTS_DIR"
+              namespace="$OBSERVABILITY_NAMESPACE"
+              rollout_deployment="$OBSERVABILITY_ROLLOUT_DEPLOYMENT"
+              health_url="$OBSERVABILITY_HEALTH_URL"
+              health_required="$OBSERVABILITY_HEALTH_REQUIRED"
+              ;;
+            *)
+              echo "Unsupported project_key: $project_key"
+              echo "Supported project_key values: brewer, observability"
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "$PAYLOAD_REPO" ]]; then
+            echo "Missing source_repo in payload"
+            exit 1
+          fi
+
+          if [[ "$PAYLOAD_REPO" != "$source_repo_allowlist" ]]; then
+            echo "Rejected source_repo: $PAYLOAD_REPO"
+            echo "Allowed source_repo: $source_repo_allowlist"
+            exit 1
+          fi
+
+          if [[ -z "$PAYLOAD_REF" ]]; then
+            echo "Missing source_ref in payload"
+            exit 1
+          fi
+
+          if [[ -z "$PAYLOAD_SHA" ]]; then
+            echo "Missing source_sha in payload"
+            exit 1
+          fi
+
+          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "Invalid source_sha: $PAYLOAD_SHA"
+            exit 1
+          fi
+
+          if [[ -z "$health_url" ]]; then
+            echo "Missing health URL for project_key=$project_key"
+            exit 1
+          fi
+
+          case "$health_required" in
+            true|false)
+              ;;
+            *)
+              echo "Invalid health_required value for project_key=$project_key: $health_required"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "project_key=$project_key"
+            echo "source_repo=$PAYLOAD_REPO"
+            echo "source_ref=$PAYLOAD_REF"
+            echo "source_sha=$PAYLOAD_SHA"
+            echo "source_repo_allowlist=$source_repo_allowlist"
+            echo "source_repo_dir=$source_repo_dir"
+            echo "manifests_dir=$manifests_dir"
+            echo "namespace=$namespace"
+            echo "rollout_deployment=$rollout_deployment"
+            echo "health_url=$health_url"
+            echo "health_required=$health_required"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summarize request
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### devstack deploy request"
+            echo "- event: ${{ github.event_name }}"
+            echo "- dispatch_type: ${{ github.event.action || 'workflow_dispatch' }}"
+            echo "- project_key: ${{ steps.request.outputs.project_key }}"
+            echo "- source_repo: ${{ steps.request.outputs.source_repo }}"
+            echo "- source_ref: ${{ steps.request.outputs.source_ref }}"
+            echo "- source_sha: ${{ steps.request.outputs.source_sha }}"
+            echo "- namespace: ${{ steps.request.outputs.namespace }}"
+            echo "- source_repo_dir: ${{ steps.request.outputs.source_repo_dir }}"
+            echo "- manifests_dir: ${{ steps.request.outputs.manifests_dir }}"
+            echo "- rollout_deployment: ${{ steps.request.outputs.rollout_deployment }}"
+            echo "- health_required: ${{ steps.request.outputs.health_required }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy infra to devserverpi
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEVPI_HOST }}
@@ -21,14 +189,103 @@ jobs:
           key: ${{ secrets.DEVPI_SSH_PRIVATE_KEY }}
           script: |
             set -euo pipefail
-            echo "Updating devstack on Pi..."
-            cd /home/dante/devstack
+            project_key='${{ steps.request.outputs.project_key }}'
+            source_repo='${{ steps.request.outputs.source_repo }}'
+            source_ref='${{ steps.request.outputs.source_ref }}'
+            source_sha='${{ steps.request.outputs.source_sha }}'
+            source_repo_dir='${{ steps.request.outputs.source_repo_dir }}'
+            manifests_dir='${{ steps.request.outputs.manifests_dir }}'
+            namespace='${{ steps.request.outputs.namespace }}'
+            rollout_deployment='${{ steps.request.outputs.rollout_deployment }}'
+            health_url='${{ steps.request.outputs.health_url }}'
+            health_required='${{ steps.request.outputs.health_required }}'
+
+            echo "Updating devstack on devserverpi..."
+            echo "project_key=$project_key"
+            echo "source_repo=$source_repo"
+            echo "source_ref=$source_ref"
+            echo "source_sha=$source_sha"
+            echo "source_repo_dir=$source_repo_dir"
+            echo "manifests_dir=$manifests_dir"
+            echo "namespace=$namespace"
+            echo "rollout_deployment=$rollout_deployment"
+            echo "health_required=$health_required"
+
+            if [[ -z "$health_url" ]]; then
+              echo "Missing DEVSTACK_HEALTH_URL"
+              exit 1
+            fi
+
+            if kubectl get ns >/dev/null 2>&1; then
+              KUBECTL_CMD=(kubectl)
+            elif sudo -n kubectl get ns >/dev/null 2>&1; then
+              KUBECTL_CMD=(sudo -n kubectl)
+            else
+              echo "No valid kubectl context found (direct or sudo -n)"
+              exit 1
+            fi
+
+            cd "$source_repo_dir"
             git fetch origin
-            git checkout ${GITHUB_REF#refs/heads/}
-            git pull --ff-only origin ${GITHUB_REF#refs/heads/}
+            git checkout --force "$source_ref"
+            git reset --hard "$source_sha"
 
-            # Load env and restart services
-            docker compose --env-file .env up -d --remove-orphans
+            if [[ ! -d "$manifests_dir" ]]; then
+              echo "Missing k8s manifests in $manifests_dir"
+              exit 1
+            fi
 
-            echo "devstack deployed successfully at $(date)"
-            docker compose ps
+            "${KUBECTL_CMD[@]}" -n "$namespace" apply -f "$manifests_dir"/
+            "${KUBECTL_CMD[@]}" -n "$namespace" rollout status "deployment/$rollout_deployment" --timeout=5m
+
+            if [[ "$health_required" == "true" ]]; then
+              curl -fsS "$health_url" >/dev/null
+            else
+              echo "Skipping health check for project_key=$project_key"
+            fi
+
+            {
+              echo "devstack deployed successfully"
+              echo "- project_key: $project_key"
+              echo "- source_repo: $source_repo"
+              echo "- source_ref: $source_ref"
+              echo "- source_sha: $source_sha"
+              echo "- namespace: $namespace"
+              echo "- rollout_deployment: $rollout_deployment"
+              echo "- manifests_dir: $manifests_dir"
+              echo "- health_url: $health_url"
+              echo "- health_required: $health_required"
+              echo "- deployed_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Roll back on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEVPI_HOST }}
+          username: ${{ secrets.DEVPI_USER }}
+          key: ${{ secrets.DEVPI_SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+            project_key='${{ steps.request.outputs.project_key }}'
+            namespace='${{ steps.request.outputs.namespace }}'
+            rollout_deployment='${{ steps.request.outputs.rollout_deployment }}'
+
+            if [[ -z "$namespace" || -z "$rollout_deployment" ]]; then
+              echo "Skipping rollback because request resolution is incomplete"
+              exit 0
+            fi
+
+            echo "Rollback triggered for project_key=$project_key"
+
+            if kubectl get ns >/dev/null 2>&1; then
+              KUBECTL_CMD=(kubectl)
+            elif sudo -n kubectl get ns >/dev/null 2>&1; then
+              KUBECTL_CMD=(sudo -n kubectl)
+            else
+              echo "No valid kubectl context found during rollback"
+              exit 0
+            fi
+
+            "${KUBECTL_CMD[@]}" -n "$namespace" rollout undo "deployment/$rollout_deployment" || true
+            "${KUBECTL_CMD[@]}" -n "$namespace" rollout status "deployment/$rollout_deployment" --timeout=2m || true
