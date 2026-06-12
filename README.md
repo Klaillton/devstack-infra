@@ -124,3 +124,18 @@ Validacao em campo no devserverpi:
 - acesso SSH autorizado com usuario `dante`
 - `kubectl` disponivel via `sudo -n`
 - manifests encontrados em `/home/dante/brewer/k8s`
+
+## Padronização de branches (master)
+
+Para consistência com repositórios fonte como `brewer` (cujo default branch é `master`), este projeto usa `master` como branch padrão.
+
+- O script `scripts/setup-devserverpi.sh` força `master` localmente nos clones no devserverpi (com fallback para `main` se o remoto ainda usar).
+- No workflow, o `source_ref` vem do evento do brewer (normalmente `master`).
+- Se um projeto fonte usar `main`, o script e o workflow respeitam o `source_ref` fornecido.
+
+Para mudar o default branch deste repositório (devstack-infra) de volta para `main` no futuro:
+1. Renomeie localmente: git branch -M main
+2. Push: git push origin main
+3. No GitHub: Settings > Branches > defina "main" como default
+4. Delete "master" se desejar
+5. Atualize este README e o script de setup.
