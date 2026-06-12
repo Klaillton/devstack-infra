@@ -182,7 +182,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy infra to devserverpi
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.DEVPI_HOST }}
           username: ${{ secrets.DEVPI_USER }}
@@ -260,7 +260,7 @@ jobs:
 
       - name: Roll back on failure
         if: failure()
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.DEVPI_HOST }}
           username: ${{ secrets.DEVPI_USER }}
